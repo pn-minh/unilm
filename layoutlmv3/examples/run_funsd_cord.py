@@ -66,6 +66,10 @@ class ModelArguments:
             "with private models)."
         },
     )
+    use_aetnet: bool = field(
+        default=False,
+        metadata={"help": "Enable the optional AETNet image, prompt, fusion, and alignment modules."},
+    )
 
 
 @dataclass
@@ -260,6 +264,7 @@ def main():
         input_size=data_args.input_size,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+    config.aetnet_enabled = model_args.use_aetnet or getattr(config, "aetnet_enabled", False)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         tokenizer_file=None,  # avoid loading from a cached file of the pre-trained model in another machine
@@ -277,6 +282,8 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+    if config.aetnet_enabled and not data_args.visual_embed:
+        raise ValueError("AETNet requires visual_embed=True so document images are provided to the model.")
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):

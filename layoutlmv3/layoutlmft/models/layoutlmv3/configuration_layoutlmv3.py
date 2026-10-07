@@ -37,6 +37,10 @@ class LayoutLMv3Config(BertConfig):
         input_size=224,
         second_input_size=112,
         device='cuda',
+        aetnet_enabled=False,
+        aetnet_prompt_count=8,
+        aetnet_alignment_weight=0.1,
+        aetnet_temperature=0.07,
         **kwargs
     ):
         """Constructs RobertaConfig."""
@@ -58,3 +62,7 @@ class LayoutLMv3Config(BertConfig):
         self.input_size = input_size
         self.second_input_size = second_input_size
         self.device = device
+        self.aetnet_enabled = aetnet_enabled
+        self.aetnet_prompt_count = aetnet_prompt_count
+        self.aetnet_alignment_weight = aetnet_alignment_weight
+        self.aetnet_temperature = aetnet_temperature

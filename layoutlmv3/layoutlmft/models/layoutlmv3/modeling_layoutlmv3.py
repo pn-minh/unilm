@@ -818,6 +818,8 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
         images=None,
+        image_enhancement=None,
+        text_hint=None,
     ):
         r"""
         encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
@@ -897,6 +899,8 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 past_key_values_length=past_key_values_length,
             )
+            if text_hint is not None:
+                embedding_output = embedding_output + text_hint
 
         final_bbox = final_position_ids = None
         Hp = Wp = None
@@ -904,6 +908,15 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
             patch_size = 16
             Hp, Wp = int(images.shape[2] / patch_size), int(images.shape[3] / patch_size)
             visual_emb = self.forward_image(images)
+            if image_enhancement is not None:
+                if image_enhancement.shape != visual_emb[:, 1:, :].shape:
+                    raise ValueError(
+                        "image_enhancement must match the visual patch embedding shape "
+                        f"{tuple(visual_emb[:, 1:, :].shape)}, got {tuple(image_enhancement.shape)}"
+                    )
+                visual_emb = torch.cat(
+                    [visual_emb[:, :1, :], visual_emb[:, 1:, :] + image_enhancement], dim=1
+                )
             if self.detection:
                 visual_attention_mask = torch.ones((batch_size, visual_emb.shape[1]), dtype=torch.long, device=device)
                 if self.image_only:
@@ -1027,6 +1040,34 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
         else:
             self.classifier = LayoutLMv3ClassificationHead(config, pool_feature=False)
 
+        self.aetnet_enabled = getattr(config, "aetnet_enabled", False)
+        if self.aetnet_enabled:
+            hidden_size = config.hidden_size
+            side_size = max(hidden_size // 4, 32)
+            self.image_side_encoder = nn.Sequential(
+                nn.Conv2d(3, side_size, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Conv2d(side_size, hidden_size // 2, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Conv2d(hidden_size // 2, hidden_size, kernel_size=3, padding=1),
+            )
+            self.image_enhancement_gate = nn.Parameter(torch.tensor(-2.0))
+            self.hint_prompts = nn.Parameter(
+                torch.empty(1, config.aetnet_prompt_count, hidden_size)
+            )
+            nn.init.normal_(self.hint_prompts, mean=0.0, std=config.initializer_range)
+            self.hint_attention = nn.MultiheadAttention(
+                hidden_size, config.num_attention_heads, batch_first=True
+            )
+            self.cross_modal_attention = nn.MultiheadAttention(
+                hidden_size, config.num_attention_heads, batch_first=True
+            )
+            self.cross_modal_norm = nn.LayerNorm(hidden_size, eps=config.layer_norm_eps)
+            self.cross_modal_gate = nn.Parameter(torch.tensor(-2.0))
+            self.alignment_image_projection = nn.Linear(hidden_size, hidden_size)
+            self.alignment_text_projection = nn.Linear(hidden_size, hidden_size)
+            self.alignment_dropout = nn.Dropout(config.hidden_dropout_prob)
+
         self.init_weights()
 
     def forward(
@@ -1044,6 +1085,7 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
         images=None,
+        **kwargs,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
@@ -1051,6 +1093,29 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
             1]``.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        text_length = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+        image_enhancement = None
+        text_hint = None
+        if self.aetnet_enabled:
+            if images is None:
+                raise ValueError("AETNet requires document images; pass images with shape (batch, 3, H, W).")
+            image_grid = self.image_side_encoder(images)
+            patch_height = images.shape[-2] // 16
+            patch_width = images.shape[-1] // 16
+            image_grid = F.interpolate(
+                image_grid, size=(patch_height, patch_width), mode="bilinear", align_corners=False
+            )
+            image_enhancement = image_grid.flatten(2).transpose(1, 2)
+            image_enhancement = F.layer_norm(image_enhancement, (self.config.hidden_size,))
+            image_enhancement = torch.sigmoid(self.image_enhancement_gate) * image_enhancement
+
+            if inputs_embeds is None:
+                text_embeddings = self.layoutlmv3.embeddings.word_embeddings(input_ids)
+            else:
+                text_embeddings = inputs_embeds
+            prompt_bank = self.hint_prompts.expand(text_embeddings.shape[0], -1, -1)
+            text_hint, _ = self.hint_attention(text_embeddings, prompt_bank, prompt_bank, need_weights=False)
 
         outputs = self.layoutlmv3(
             input_ids,
@@ -1065,9 +1130,22 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
             return_dict=return_dict,
             images=images,
             valid_span=valid_span,
+            image_enhancement=image_enhancement,
+            text_hint=text_hint,
         )
 
         sequence_output = outputs[0]
+
+        if self.aetnet_enabled:
+            text_states = sequence_output[:, :text_length]
+            image_states = sequence_output[:, text_length:]
+            cross_modal_states, _ = self.cross_modal_attention(
+                text_states, image_states, image_states, need_weights=False
+            )
+            text_states = self.cross_modal_norm(
+                text_states + torch.sigmoid(self.cross_modal_gate) * cross_modal_states
+            )
+            sequence_output = torch.cat([text_states, image_states], dim=1)
 
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
@@ -1086,6 +1164,13 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
             else:
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
+            if self.aetnet_enabled and self.training:
+                text_mask = attention_mask[:, :text_length] if attention_mask is not None else None
+                alignment_loss = self._aetnet_alignment_loss(
+                    sequence_output, text_length, bbox, text_mask
+                )
+                loss = loss + self.config.aetnet_alignment_weight * alignment_loss
+
         if not return_dict:
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
@@ -1096,6 +1181,89 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def _aetnet_alignment_loss(self, sequence_output, text_length, bbox, text_mask):
+        text_states = sequence_output[:, :text_length]
+        image_states = sequence_output[:, text_length:]
+        image_cls = image_states[:, 0]
+        image_patches = image_states[:, 1:]
+        if text_mask is None:
+            text_mask = torch.ones(text_states.shape[:2], device=text_states.device, dtype=torch.bool)
+        else:
+            text_mask = text_mask.bool()
+
+        text_denominator = text_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        text_local = (text_states * text_mask.unsqueeze(-1)).sum(dim=1) / text_denominator
+        text_global = text_states[:, 0]
+        image_global_projected = F.normalize(self.alignment_image_projection(image_cls), dim=-1)
+        text_global_projected = F.normalize(self.alignment_text_projection(text_global), dim=-1)
+        temperature = max(float(self.config.aetnet_temperature), 1e-6)
+        batch_size = sequence_output.shape[0]
+        targets = torch.arange(batch_size, device=sequence_output.device)
+        global_scores = image_global_projected @ text_global_projected.transpose(0, 1) / temperature
+        ditc_loss = (
+            F.cross_entropy(global_scores, targets)
+            + F.cross_entropy(global_scores.transpose(0, 1), targets)
+        ) / 2
+
+        # Dropout provides two inexpensive views for the intra-modal objective.
+        image_view_a = F.normalize(self.alignment_dropout(image_global_projected), dim=-1)
+        image_view_b = F.normalize(self.alignment_dropout(image_global_projected), dim=-1)
+        text_view_a = F.normalize(self.alignment_dropout(text_global_projected), dim=-1)
+        text_view_b = F.normalize(self.alignment_dropout(text_global_projected), dim=-1)
+        image_imc = _aetnet_view_contrastive_loss(image_view_a, image_view_b, temperature)
+        text_imc = _aetnet_view_contrastive_loss(text_view_a, text_view_b, temperature)
+        imc_loss = (image_imc + text_imc) / 2
+
+        image_local_projected = F.normalize(
+            self.alignment_image_projection(image_patches.mean(dim=1)), dim=-1
+        )
+        text_local_projected = F.normalize(self.alignment_text_projection(text_local), dim=-1)
+        glitc_image_to_text = image_global_projected @ text_local_projected.transpose(0, 1) / temperature
+        glitc_text_to_image = text_global_projected @ image_local_projected.transpose(0, 1) / temperature
+        glitc_loss = (
+            F.cross_entropy(glitc_image_to_text, targets)
+            + F.cross_entropy(glitc_text_to_image, targets)
+        ) / 2
+
+        pita_loss = sequence_output.new_zeros(())
+        if bbox is not None and image_patches.shape[1] > 0:
+            patch_count = image_patches.shape[1]
+            patch_width = max(int(round(patch_count ** 0.5)), 1)
+            patch_height = max(patch_count // patch_width, 1)
+            boxes = bbox[:, :text_length].to(device=sequence_output.device)
+            centers_x = (boxes[:, :, 0] + boxes[:, :, 2]).float() / 2
+            centers_y = (boxes[:, :, 1] + boxes[:, :, 3]).float() / 2
+            columns = (centers_x * patch_width / 1000).long().clamp(0, patch_width - 1)
+            rows = (centers_y * patch_height / 1000).long().clamp(0, patch_height - 1)
+            patch_ids = rows * patch_width + columns
+            valid_tokens = text_mask & (boxes[:, :, 2] > boxes[:, :, 0]) & (boxes[:, :, 3] > boxes[:, :, 1])
+            valid_tokens = valid_tokens & (patch_ids < patch_count)
+            aligned_text = image_patches.new_zeros(image_patches.shape)
+            counts = image_patches.new_zeros(image_patches.shape[:2])
+            aligned_text.scatter_add_(
+                1,
+                patch_ids.unsqueeze(-1).expand(-1, -1, image_patches.shape[-1]),
+                text_states * valid_tokens.unsqueeze(-1),
+            )
+            counts.scatter_add_(1, patch_ids, valid_tokens.to(counts.dtype))
+            matched = counts > 0
+            aligned_text = aligned_text / counts.clamp(min=1).unsqueeze(-1)
+            if matched.any():
+                cosine = F.cosine_similarity(aligned_text, image_patches, dim=-1)
+                pita_loss = (1 - cosine[matched]).mean()
+
+        return ditc_loss + imc_loss + glitc_loss + pita_loss
+
+
+def _aetnet_view_contrastive_loss(view_a, view_b, temperature):
+    batch_size = view_a.shape[0]
+    views = torch.cat([view_a, view_b], dim=0)
+    similarities = views @ views.transpose(0, 1) / temperature
+    diagonal = torch.eye(2 * batch_size, device=views.device, dtype=torch.bool)
+    similarities = similarities.masked_fill(diagonal, torch.finfo(similarities.dtype).min)
+    targets = (torch.arange(2 * batch_size, device=views.device) + batch_size) % (2 * batch_size)
+    return F.cross_entropy(similarities, targets)
 
 
 class LayoutLMv3ForQuestionAnswering(LayoutLMv3PreTrainedModel):

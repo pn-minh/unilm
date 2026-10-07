@@ -57,6 +57,33 @@ We provide some fine-tuned models and their train/test logs.
   | [layoutlmv3-base-finetuned-funsd](https://huggingface.co/HYPJUDY/layoutlmv3-base-finetuned-funsd)   |   0.8955  | 0.9165 |  0.9059  | 
   | [layoutlmv3-large-finetuned-funsd](https://huggingface.co/HYPJUDY/layoutlmv3-large-finetuned-funsd) | 0.9219    | 0.9210 |  0.9215  | 
 
+  ## AETNet Fine-tuning
+
+  This fork includes an opt-in `--use_aetnet` variant of token classification. It keeps the baseline LayoutLMv3 path unchanged unless enabled. The added modules are:
+
+  - A small convolutional image side encoder whose patch-aligned features are added to LayoutLMv3 visual patch embeddings.
+  - A trainable soft-prompt bank that conditions text embeddings without adding output positions or changing token-label alignment.
+  - Gated text-to-image attention after the pretrained multimodal encoder.
+  - Training-only DITC, dropout-view IMC, global/local cross-modal contrast, and OCR-box-to-image-patch cosine alignment losses.
+
+  This is a practical adaptation of the attached AETNet and DocExtractNet papers, not a reproduction of their full experiments. In particular, learned prompts provide task context; they cannot recover facts absent from both the receipt and its context. The optional modules are currently implemented for token classification (FUNSD/CORD), and no scores are claimed until the experiments are run on the target data.
+
+  Train on FUNSD using the existing data pipeline:
+
+  ```bash
+  python examples/run_funsd_cord.py \
+    --dataset_name funsd --do_train --do_eval --use_aetnet \
+    --model_name_or_path microsoft/layoutlmv3-base \
+    --output_dir output/aetnet-funsd \
+    --input_size 224 --max_steps 1000 --save_steps 250 \
+    --evaluation_strategy steps --eval_steps 250 \
+    --learning_rate 1e-5 --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 --gradient_accumulation_steps 2 \
+    --fp16 --dataloader_num_workers 4
+  ```
+
+  Evaluate a saved AETNet checkpoint with the same script and `--do_eval --use_aetnet`, setting `--model_name_or_path output/aetnet-funsd`. CORD is selected with `--dataset_name cord`. For rented-GPU setup, data persistence, and troubleshooting, see [AETNET_VASTAI.md](AETNET_VASTAI.md).
+
 ### Document Layout Analysis on PubLayNet
 Please follow [unilm/dit/object_detection](https://github.com/microsoft/unilm/blob/master/dit/object_detection/README.md) to prepare data and read more details about this task.
 In the folder of layoutlmv3/examples/object_detecion:
