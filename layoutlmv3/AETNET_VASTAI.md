@@ -16,12 +16,13 @@ OCR tokens -> LayoutLMv3 text/layout embedding + learned soft hints ----+-> Layo
 
 The CNN side encoder makes ImageEnhance spatial (rather than globally pooled), so its output aligns with image patches. Soft prompts borrow the PrecisionHints/P-Tuning idea but do not fabricate absent receipt fields. Cross-modal attention extends LayoutLMv3's existing fusion. The alignment loss adapts the AET paper: symmetric in-batch document contrast, dropout-based two-view intra-modal contrast, global/local cross-modal contrast, and OCR-box-to-patch cosine alignment. It uses no momentum queue or separate full ViT/RoBERTa towers, trading fidelity to the paper for a smaller, practical fine-tuning model. Alignment loss is training-only; evaluation reports the standard supervised task metrics.
 
-## Rent and connect a GPU
-
-1. Create/sign in to a Vast.ai account and add billing credit. Avoid sharing API keys or private SSH keys in chat or in this repository.
+CORD_DOWNLOAD='/workspace/.hf_home/datasets/downloads/d8e030e5da5c6927b468fa2d5046b77101b0e2b8c180fca4aa7c7729e9767f9c'
+ls -ld "$CORD_DOWNLOAD"
+file "$CORD_DOWNLOAD"
+python -c 'from pathlib import Path; p=Path("/workspace/.hf_home/datasets/downloads/d8e030e5da5c6927b468fa2d5046b77101b0e2b8c180fca4aa7c7729e9767f9c"); print(repr(p.read_bytes()[:200]))'
 2. In the GPU marketplace, filter for an Ubuntu/PyTorch-capable machine with a CUDA GPU. Prefer at least 24 GB VRAM for LayoutLMv3-base; 40 GB or more gives more room. A 16 GB card may work with batch size 1, but the in-batch contrastive terms then have no negative examples. Gradient accumulation does not increase the contrastive batch; keep per-device batch size at 2 or higher for the intended combined objective.
 3. Compare GPU VRAM, host reliability, disk space, bandwidth, hourly price, and location. Start with an on-demand rental for a short smoke test; check the current instance terms and storage charges before confirming.
-4. Select a PyTorch/CUDA template, allocate persistent disk, and expose SSH access. Start the instance and copy the SSH command shown by Vast.ai. Connect from your local terminal with that command; accept the host key only if the displayed host/fingerprint matches the instance details.
+If `file` reports HTML/text instead of a ZIP, the archive source did not provide the expected CORD tree. Share these outputs and the archive download log; do not delete the full Hugging Face cache. The Azure archive URLs commented in `layoutlmft/data/cord.py` are currently inaccessible, so use the configured Google Drive links unless a maintained mirror is verified.
 5. Keep the repository and datasets on persistent storage, not temporary instance storage. Stop or destroy the instance when finished; confirm what happens to disk storage separately because persistent disks can continue to incur charges.
 
 The marketplace UI and available templates change, so use the current Vast.ai instance panel for the exact rental, SSH, and port-forwarding values.
@@ -153,7 +154,31 @@ python examples/run_funsd_cord.py \
   --gradient_accumulation_steps 2 --learning_rate 5e-5 --fp16
 ```
 
-The flag is optional and should be removed for later runs to reuse the dataset cache. If the same error remains, inspect the offending entry without deleting anything:
+The flag is optional and should be removed for later runs to reuse the dataset cache. If the same error remains, the hash entry itself may be a regular file instead of an extracted archive. You can bypass it by downloading the two archive parts manually. The updated CORD builder accepts their extracted parent directory through `--data_dir`:
+
+```bash
+python -m pip install gdown==4.7.3
+mkdir -p /workspace/data/cord
+gdown --id 1MqhTbcj-AHXOqYoeoh12aRUwIprzTJYI -O /workspace/data/CORD-1k-001.zip
+gdown --id 1wYdp5nC9LnHQZ2FcmOoC0eClyWvcuARU -O /workspace/data/CORD-1k-002.zip
+python -m zipfile -e /workspace/data/CORD-1k-001.zip /workspace/data/cord
+python -m zipfile -e /workspace/data/CORD-1k-002.zip /workspace/data/cord
+find /workspace/data/cord -maxdepth 4 -type d | sort | head -30
+```
+
+Before training, confirm the extracted data includes `CORD/train/image`, `CORD/train/json`, `CORD/dev/image`, `CORD/dev/json`, and `CORD/test/image`. Then run:
+
+```bash
+python examples/run_funsd_cord.py \
+  --dataset_name cord --data_dir /workspace/data/cord --do_train --do_eval --use_aetnet \
+  --model_name_or_path microsoft/layoutlmv3-base \
+  --output_dir output/aetnet-cord \
+  --input_size 224 --max_steps 1000 \
+  --per_device_train_batch_size 2 --per_device_eval_batch_size 2 \
+  --gradient_accumulation_steps 2 --learning_rate 5e-5 --fp16
+```
+
+If `gdown` reports a permission/quota error, the source download failed; do not try to extract its HTML response as a ZIP. To inspect the bad cache entry without deleting anything:
 
 ```bash
 CORD_IMAGE_PATH='/workspace/.hf_home/datasets/downloads/d8e030e5da5c6927b468fa2d5046b77101b0e2b8c180fca4aa7c7729e9767f9c/CORD/train/image'

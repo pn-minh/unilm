@@ -225,6 +225,7 @@ def main():
         datasets = load_dataset(
             os.path.abspath(layoutlmft.data.cord.__file__),
             cache_dir=model_args.cache_dir,
+            data_dir=data_args.data_dir,
             download_mode=download_mode,
         )
     else:

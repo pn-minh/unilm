@@ -60,12 +60,13 @@ _URLS = [
 
 class CordConfig(datasets.BuilderConfig):
     """BuilderConfig for CORD"""
-    def __init__(self, **kwargs):
+    def __init__(self, data_dir=None, **kwargs):
         """BuilderConfig for CORD.
         Args:
           **kwargs: keyword arguments forwarded to super.
         """
         super(CordConfig, self).__init__(**kwargs)
+        self.data_dir = data_dir
 
 class Cord(datasets.GeneratorBasedBuilder):
     BUILDER_CONFIGS = [
@@ -96,17 +97,50 @@ class Cord(datasets.GeneratorBasedBuilder):
 
     def _split_generators(self, dl_manager):
         """Returns SplitGenerators."""
-        """Uses local files located with data_dir"""
-        downloaded_file = dl_manager.download_and_extract(_URLS)
-        # move files from the second URL together with files from the first one.
-        dest = Path(downloaded_file[0])/"CORD"
+        if self.config.data_dir:
+            data_root = Path(self.config.data_dir)
+            dest = data_root / "CORD" if (data_root / "CORD").is_dir() else data_root
+        else:
+            downloaded_file = dl_manager.download_and_extract(_URLS)
+            first_root = Path(downloaded_file[0])
+            second_root = Path(downloaded_file[1])
+            dest = first_root / "CORD"
+            second_cord = second_root / "CORD"
+
+            if not dest.is_dir():
+                raise ValueError(
+                    "The first CORD download was not extracted as a directory. "
+                    "The source may have returned an HTML/error page instead of a ZIP. "
+                    "Download and extract both CORD archives manually, then pass their parent "
+                    "directory with --data_dir."
+                )
+            if not second_cord.is_dir():
+                raise ValueError(
+                    "The second CORD download was not extracted as a directory. "
+                    "The source may have returned an HTML/error page instead of a ZIP. "
+                    "Download and extract both CORD archives manually, then pass their parent "
+                    "directory with --data_dir."
+                )
+
+            # The second archive contains examples that complement the first archive.
+            for split in ["train", "dev", "test"]:
+                for file_type in ["image", "json"]:
+                    if split == "test" and file_type == "json":
+                        continue
+                    source_dir = second_cord / split / file_type
+                    target_dir = dest / split / file_type
+                    if not source_dir.is_dir():
+                        raise ValueError(f"Expected CORD directory was not found: {source_dir}")
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    for source_file in source_dir.iterdir():
+                        os.replace(str(source_file), str(target_dir / source_file.name))
+
         for split in ["train", "dev", "test"]:
-            for file_type in ["image", "json"]:
-                if split == "test" and file_type == "json":
-                    continue
-                files = (Path(downloaded_file[1])/"CORD"/split/file_type).iterdir()
-                for f in files:
-                    os.rename(f, dest/split/file_type/f.name)
+            if not (dest / split / "image").is_dir():
+                raise ValueError(f"Expected CORD image directory was not found: {dest / split / 'image'}")
+            if split != "test" and not (dest / split / "json").is_dir():
+                raise ValueError(f"Expected CORD annotation directory was not found: {dest / split / 'json'}")
+
         return [
             datasets.SplitGenerator(
                 name=datasets.Split.TRAIN, gen_kwargs={"filepath": dest/"train"}
