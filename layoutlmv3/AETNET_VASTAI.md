@@ -139,6 +139,30 @@ The expected output is `layoutlmv3`. This patch is inside the virtual environmen
 
 Some legacy dependencies access `distutils.version` after importing only `distutils`. The training entry point now imports `distutils.version` before loading Transformers, timm, or torchvision, which ensures the submodule attribute exists. Pull the latest fork changes and rerun the command. If the error still occurs, capture the complete traceback because another imported dependency may be using its own version check.
 
+## Fix malformed CORD download cache
+
+The CORD loader expects both downloaded archives to contain directories shaped like `CORD/train/image`, `CORD/train/json`, and corresponding `dev`/`test` folders. A `NotADirectoryError` at `.../CORD/train/image` means the cached archive produced a regular file at the path where the loader expects an image directory. First force a one-time re-download and extraction:
+
+```bash
+python examples/run_funsd_cord.py \
+  --dataset_name cord --force_redownload_dataset --do_train --do_eval --use_aetnet \
+  --model_name_or_path microsoft/layoutlmv3-base \
+  --output_dir output/aetnet-cord \
+  --input_size 224 --max_steps 1000 \
+  --per_device_train_batch_size 2 --per_device_eval_batch_size 2 \
+  --gradient_accumulation_steps 2 --learning_rate 5e-5 --fp16
+```
+
+The flag is optional and should be removed for later runs to reuse the dataset cache. If the same error remains, inspect the offending entry without deleting anything:
+
+```bash
+CORD_IMAGE_PATH='/workspace/.hf_home/datasets/downloads/d8e030e5da5c6927b468fa2d5046b77101b0e2b8c180fca4aa7c7729e9767f9c/CORD/train/image'
+ls -ld "$CORD_IMAGE_PATH"
+file "$CORD_IMAGE_PATH"
+```
+
+If `file` reports an HTML/text response or a regular file rather than a directory, the archive source did not provide the expected CORD tree. Share those two command outputs and the archive download log; do not delete the full Hugging Face cache. The Azure archive URLs commented in `layoutlmft/data/cord.py` are currently inaccessible, so use the configured Google Drive links unless a maintained mirror is verified.
+
 ## Keep results and control cost
 
 - Use `tmux` or `screen` for SSH sessions that may disconnect. Save logs and checkpoints under the persistent disk.

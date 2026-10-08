@@ -100,6 +100,10 @@ class DataTrainingArguments:
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
+    force_redownload_dataset: bool = field(
+        default=False,
+        metadata={"help": "Force re-download and extraction of the selected dataset files once."},
+    )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
@@ -206,14 +210,23 @@ def main():
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
+    download_mode = "force_redownload" if data_args.force_redownload_dataset else None
 
     if data_args.dataset_name == 'funsd':
         # datasets = load_dataset("nielsr/funsd")
         import layoutlmft.data.funsd
-        datasets = load_dataset(os.path.abspath(layoutlmft.data.funsd.__file__), cache_dir=model_args.cache_dir)
+        datasets = load_dataset(
+            os.path.abspath(layoutlmft.data.funsd.__file__),
+            cache_dir=model_args.cache_dir,
+            download_mode=download_mode,
+        )
     elif data_args.dataset_name == 'cord':
         import layoutlmft.data.cord
-        datasets = load_dataset(os.path.abspath(layoutlmft.data.cord.__file__), cache_dir=model_args.cache_dir)
+        datasets = load_dataset(
+            os.path.abspath(layoutlmft.data.cord.__file__),
+            cache_dir=model_args.cache_dir,
+            download_mode=download_mode,
+        )
     else:
         raise NotImplementedError()
 
