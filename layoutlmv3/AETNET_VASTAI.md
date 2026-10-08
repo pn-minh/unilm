@@ -135,6 +135,10 @@ python -c 'from transformers import AutoConfig; print(AutoConfig.from_pretrained
 
 The expected output is `layoutlmv3`. This patch is inside the virtual environment and will need to be reapplied if Transformers is reinstalled. Do not apply it if the guard reports that the expected code was not found; inspect the installed Transformers version/source first.
 
+## Fix `distutils.version` AttributeError
+
+Some legacy dependencies access `distutils.version` after importing only `distutils`. The training entry point now imports `distutils.version` before loading Transformers, timm, or torchvision, which ensures the submodule attribute exists. Pull the latest fork changes and rerun the command. If the error still occurs, capture the complete traceback because another imported dependency may be using its own version check.
+
 ## Keep results and control cost
 
 - Use `tmux` or `screen` for SSH sessions that may disconnect. Save logs and checkpoints under the persistent disk.
