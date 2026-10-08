@@ -94,6 +94,47 @@ python examples/run_funsd_cord.py \
 
 Use `--dataset_name cord` for CORD. The script evaluates the dataset's `test` split under `--do_eval` and saves standard `seqeval` precision, recall, F1, and accuracy metrics under the output directory. Report multiple seeds and compare against the baseline LayoutLMv3 run using the same data, preprocessing, and training budget; this fork has not yet validated the paper's published scores.
 
+## Fix `Invalid URL` from Hugging Face
+
+With the pinned `transformers==4.12.5`, Hugging Face may return a relative redirect such as `/api/resolve-cache/...`. This Transformers version uses that `Location` value as-is instead of resolving it against `https://huggingface.co`, which makes `requests` fail with `No scheme supplied`. This is a downloader compatibility issue, not an invalid model ID.
+
+Activate the same virtual environment used for training, then apply this guarded patch to its installed Transformers file. It creates a `.bak` backup and refuses to modify the file if the expected old code is not present:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import shutil
+import transformers.file_utils as file_utils
+
+path = Path(file_utils.__file__)
+source = path.read_text()
+old_import = "from urllib.parse import urlparse"
+new_import = "from urllib.parse import urljoin, urlparse"
+old_redirect = 'url_to_download = r.headers["Location"]'
+new_redirect = 'url_to_download = urljoin(url, r.headers["Location"])'
+
+if old_redirect not in source:
+  raise SystemExit("Expected Transformers 4.12.5 redirect code was not found; no changes made.")
+if old_import not in source:
+  raise SystemExit("Expected urllib.parse import was not found; no changes made.")
+
+backup = path.with_suffix(path.suffix + ".bak")
+shutil.copy2(path, backup)
+source = source.replace(old_import, new_import, 1).replace(old_redirect, new_redirect, 1)
+path.write_text(source)
+print("Patched:", path)
+print("Backup:", backup)
+PY
+```
+
+Verify that config download now works, then retry training:
+
+```bash
+python -c 'from transformers import AutoConfig; print(AutoConfig.from_pretrained("microsoft/layoutlmv3-base").model_type)'
+```
+
+The expected output is `layoutlmv3`. This patch is inside the virtual environment and will need to be reapplied if Transformers is reinstalled. Do not apply it if the guard reports that the expected code was not found; inspect the installed Transformers version/source first.
+
 ## Keep results and control cost
 
 - Use `tmux` or `screen` for SSH sessions that may disconnect. Save logs and checkpoints under the persistent disk.
