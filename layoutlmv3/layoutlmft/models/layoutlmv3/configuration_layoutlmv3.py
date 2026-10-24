@@ -37,6 +37,10 @@ class LayoutLMv3Config(BertConfig):
         input_size=224,
         second_input_size=112,
         device='cuda',
+        use_boundary_loss=False,
+        boundary_loss_weight=0.2,
+        boundary_pos_weight=5.0,
+        b_label_ids=None,
         **kwargs
     ):
         """Constructs RobertaConfig."""
@@ -58,3 +62,7 @@ class LayoutLMv3Config(BertConfig):
         self.input_size = input_size
         self.second_input_size = second_input_size
         self.device = device
+        self.use_boundary_loss = use_boundary_loss
+        self.boundary_loss_weight = boundary_loss_weight
+        self.boundary_pos_weight = boundary_pos_weight
+        self.b_label_ids = b_label_ids

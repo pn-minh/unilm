@@ -61,6 +61,20 @@ class ModelArguments:
             "with private models)."
         },
     )
+    use_boundary_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to enable the auxiliary binary boundary head and boundary loss on entity-start (B-*) tokens."
+        },
+    )
+    boundary_loss_weight: float = field(
+        default=0.2,
+        metadata={"help": "Weight (lambda) for the auxiliary boundary loss in L_total = L_NER + lambda * L_boundary."},
+    )
+    boundary_pos_weight: float = field(
+        default=5.0,
+        metadata={"help": "Positive class weight for entity-start (B-*) tokens in the boundary loss."},
+    )
 
 
 @dataclass
@@ -197,6 +211,7 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
+    b_label_ids = [val for key, val in sorted(XFund_label2ids.items(), key=lambda x: x[1]) if key.startswith("B-")]
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=7,
@@ -204,6 +219,10 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         input_size=data_args.input_size,
+        use_boundary_loss=model_args.use_boundary_loss,
+        boundary_loss_weight=model_args.boundary_loss_weight,
+        boundary_pos_weight=model_args.boundary_pos_weight,
+        b_label_ids=b_label_ids,
         use_auth_token=True if model_args.use_auth_token else None,
     )
     tokenizer = AutoTokenizer.from_pretrained(

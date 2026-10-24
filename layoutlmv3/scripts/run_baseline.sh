@@ -8,9 +8,13 @@
 #   SIZE=large LR=... bash scripts/run_baseline.sh train            # large: README gives no recipe, LR must be set
 #
 # Env vars: DATASET=funsd|cord  SIZE=base|large  GPUS  SEED  LR  STEPS  EFF_BATCH  PER_DEVICE  OUT  PORT
-#           DRIVE_REMOTE (e.g. gdrive)  DRIVE_DIR (default thesis/layoutlmv3)  -> upload run dir when finished
+#           USE_BOUNDARY_LOSS=0|1  BOUNDARY_LOSS_WEIGHT (default 0.2)  BOUNDARY_POS_WEIGHT (default 5.0)
+#           DRIVE_MOUNT (e.g. /content/drive/MyDrive) or DRIVE_REMOTE (e.g. gdrive)
+#           DRIVE_DIR (default thesis/layoutlmv3) -> upload run dir when finished
 #
-# FUNSD-base defaults reproduce README: lr 1e-5, 1000 steps, effective batch 16 (= 8 GPUs x 2 in the README).
+# Defaults:
+#   * FUNSD (base / large): lr 1e-5, 1000 steps, effective batch 16 (= 8 GPUs x 2 in the README).
+#   * CORD  (base / large): lr 5e-5, 1000 steps, effective batch 64.
 # Effective batch is kept constant for any GPU count via gradient accumulation.
 # Run from layoutlmv3/ with the conda env active.
 set -euo pipefail
@@ -23,12 +27,17 @@ SEED="${SEED:-42}"
 PORT="${PORT:-4398}"
 PER_DEVICE="${PER_DEVICE:-2}"
 OUT="${OUT:-$HOME/runs}"
+USE_BOUNDARY_LOSS="${USE_BOUNDARY_LOSS:-0}"
+BOUNDARY_LOSS_WEIGHT="${BOUNDARY_LOSS_WEIGHT:-0.2}"
+BOUNDARY_POS_WEIGHT="${BOUNDARY_POS_WEIGHT:-5.0}"
+SAVE_MODEL="${SAVE_MODEL:-0}"
 
-# README recipe is only defined for FUNSD-base; everything else must be supplied explicitly.
-if [ "$DATASET" = "funsd" ] && [ "$SIZE" = "base" ]; then
+if [ "$DATASET" = "funsd" ]; then
   LR="${LR:-1e-5}"; STEPS="${STEPS:-1000}"; EFF_BATCH="${EFF_BATCH:-16}"
+elif [ "$DATASET" = "cord" ]; then
+  LR="${LR:-5e-5}"; STEPS="${STEPS:-1000}"; EFF_BATCH="${EFF_BATCH:-64}"
 else
-  : "${LR:?set LR (no README recipe for $DATASET-$SIZE)}"
+  : "${LR:?set LR}"
   : "${STEPS:?set STEPS}"
   : "${EFF_BATCH:?set EFF_BATCH}"
 fi
@@ -38,8 +47,16 @@ if [ $((EFF_BATCH % DENOM)) -ne 0 ]; then echo "EFF_BATCH ($EFF_BATCH) must be d
 ACCUM=$((EFF_BATCH / DENOM))
 
 LAUNCH="python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port $PORT"
-COMMON="--dataset_name $DATASET --segment_level_layout 1 --visual_embed 1 --input_size 224 --dataloader_num_workers 8 --seed $SEED"
-RUN_DIR="$OUT/$DATASET-$SIZE-seed$SEED"
+COMMON="--dataset_name $DATASET --segment_level_layout 1 --visual_embed 1 --input_size 224 --dataloader_num_workers 8 --seed $SEED --overwrite_output_dir"
+
+BOUNDARY_ARGS=""
+RUN_TAG="baseline"
+if [ "$USE_BOUNDARY_LOSS" = "1" ] || [ "$USE_BOUNDARY_LOSS" = "true" ]; then
+  BOUNDARY_ARGS="--use_boundary_loss True --boundary_loss_weight $BOUNDARY_LOSS_WEIGHT --boundary_pos_weight $BOUNDARY_POS_WEIGHT"
+  RUN_TAG="boundary-w${BOUNDARY_LOSS_WEIGHT}-pw${BOUNDARY_POS_WEIGHT}"
+fi
+
+RUN_DIR="$OUT/$DATASET-$SIZE-$RUN_TAG-seed$SEED"
 
 case "$MODE" in
   eval-released)
@@ -54,7 +71,11 @@ case "$MODE" in
       --model_name_or_path "microsoft/layoutlmv3-$SIZE" \
       --output_dir "$RUN_DIR" \
       --max_steps "$STEPS" --save_steps -1 --evaluation_strategy steps --eval_steps 100 \
-      --learning_rate "$LR" --per_device_train_batch_size "$PER_DEVICE" --gradient_accumulation_steps "$ACCUM"
+      --learning_rate "$LR" --per_device_train_batch_size "$PER_DEVICE" --gradient_accumulation_steps "$ACCUM" \
+      $BOUNDARY_ARGS
+    if [ "$SAVE_MODEL" = "0" ]; then
+      rm -f "$RUN_DIR/pytorch_model.bin" "$RUN_DIR/optimizer.pt" "$RUN_DIR/scheduler.pt"
+    fi
     ;;
   *) echo "unknown mode $MODE"; exit 1;;
 esac
@@ -64,11 +85,12 @@ cat "$RUN_DIR/eval_results.json"
 # Save the exact settings next to the results (for the thesis' reproducibility appendix)
 {
   echo "mode=$MODE dataset=$DATASET size=$SIZE gpus=$GPUS seed=$SEED lr=${LR:-n/a} steps=${STEPS:-n/a} eff_batch=${EFF_BATCH:-n/a}"
+  echo "use_boundary_loss=$USE_BOUNDARY_LOSS boundary_loss_weight=$BOUNDARY_LOSS_WEIGHT boundary_pos_weight=$BOUNDARY_POS_WEIGHT"
   echo "git=$(git rev-parse HEAD 2>/dev/null) dirty=$(git status --porcelain 2>/dev/null | wc -l)"
   nvidia-smi --query-gpu=name --format=csv,noheader | head -1
 } > "$RUN_DIR/run_info.txt"
 
-if [ -n "${DRIVE_REMOTE:-}" ]; then
+if [ -n "${DRIVE_REMOTE:-}" ] || [ -n "${DRIVE_MOUNT:-}" ]; then
   bash "$(dirname "$0")/sync_to_drive.sh" "$RUN_DIR"
 fi
 

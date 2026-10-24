@@ -44,9 +44,8 @@ def quad_to_box(quad):
     return box
 
 def _get_drive_url(url):
-    base_url = 'https://drive.google.com/uc?id='
     split_url = url.split('/')
-    return base_url + split_url[5]
+    return f"https://drive.usercontent.google.com/download?id={split_url[5]}&confirm=t"
 
 _URLS = [
     _get_drive_url("https://drive.google.com/file/d/1MqhTbcj-AHXOqYoeoh12aRUwIprzTJYI/"),
@@ -104,9 +103,14 @@ class Cord(datasets.GeneratorBasedBuilder):
             for file_type in ["image", "json"]:
                 if split == "test" and file_type == "json":
                     continue
-                files = (Path(downloaded_file[1])/"CORD"/split/file_type).iterdir()
-                for f in files:
-                    os.rename(f, dest/split/file_type/f.name)
+                src_dir = Path(downloaded_file[1]) / "CORD" / split / file_type
+                dst_dir = dest / split / file_type
+                if src_dir.exists():
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    for f in src_dir.iterdir():
+                        target = dst_dir / f.name
+                        if not target.exists():
+                            os.rename(f, target)
         return [
             datasets.SplitGenerator(
                 name=datasets.Split.TRAIN, gen_kwargs={"filepath": dest/"train"}

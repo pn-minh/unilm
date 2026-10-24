@@ -1014,7 +1014,7 @@ class LayoutLMv3ClassificationHead(nn.Module):
 
 class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
+    _keys_to_ignore_on_load_missing = [r"position_ids", r"boundary_classifier"]
 
     def __init__(self, config):
         super().__init__(config)
@@ -1027,7 +1027,29 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
         else:
             self.classifier = LayoutLMv3ClassificationHead(config, pool_feature=False)
 
+        self.use_boundary_loss = getattr(config, "use_boundary_loss", False)
+        self.boundary_loss_weight = getattr(config, "boundary_loss_weight", 0.2)
+        self.boundary_pos_weight = getattr(config, "boundary_pos_weight", 5.0)
+        if self.use_boundary_loss:
+            self.boundary_classifier = nn.Linear(config.hidden_size, 2)
+
         self.init_weights()
+
+    def _get_b_label_ids(self, device):
+        """Return a 1D LongTensor of label IDs corresponding to entity-start (B-*) tags."""
+        b_label_ids = getattr(self.config, "b_label_ids", None)
+        if b_label_ids is None and getattr(self.config, "id2label", None):
+            inferred = [
+                int(k)
+                for k, v in self.config.id2label.items()
+                if isinstance(v, str) and v.startswith("B-")
+            ]
+            if len(inferred) > 0:
+                b_label_ids = sorted(inferred)
+        if not b_label_ids:
+            # Fallback for BIO tag sets where 0 is 'O' and odd indices are 'B-*'
+            b_label_ids = list(range(1, self.num_labels, 2))
+        return torch.tensor(b_label_ids, dtype=torch.long, device=device)
 
     def forward(
         self,
@@ -1071,6 +1093,7 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
 
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
+        boundary_logits = self.boundary_classifier(sequence_output) if self.use_boundary_loss else None
 
         loss = None
         if labels is not None:
@@ -1082,9 +1105,37 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
                 active_labels = torch.where(
                     active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
                 )
-                loss = loss_fct(active_logits, active_labels)
+                ner_loss = loss_fct(active_logits, active_labels)
             else:
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                active_labels = labels.view(-1)
+                ner_loss = loss_fct(logits.view(-1, self.num_labels), active_labels)
+
+            if self.use_boundary_loss:
+                b_label_ids = self._get_b_label_ids(active_labels.device)
+                is_ignored = active_labels == loss_fct.ignore_index
+                is_b_token = (active_labels.unsqueeze(-1) == b_label_ids).any(dim=-1)
+                boundary_labels = torch.where(
+                    is_ignored,
+                    torch.tensor(loss_fct.ignore_index, dtype=torch.long, device=active_labels.device),
+                    is_b_token.long(),
+                )
+                if (boundary_labels != loss_fct.ignore_index).any():
+                    boundary_weight = torch.tensor(
+                        [1.0, float(self.boundary_pos_weight)],
+                        dtype=boundary_logits.dtype,
+                        device=boundary_logits.device,
+                    )
+                    boundary_loss_fct = CrossEntropyLoss(
+                        weight=boundary_weight, ignore_index=loss_fct.ignore_index
+                    )
+                    boundary_loss = boundary_loss_fct(boundary_logits.view(-1, 2), boundary_labels)
+                else:
+                    boundary_loss = ner_loss.new_zeros(())
+                loss = ner_loss + self.boundary_loss_weight * boundary_loss
+                self._last_ner_loss = ner_loss.detach()
+                self._last_boundary_loss = boundary_loss.detach()
+            else:
+                loss = ner_loss
 
         if not return_dict:
             output = (logits,) + outputs[2:]
