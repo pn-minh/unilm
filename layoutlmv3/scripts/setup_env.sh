@@ -18,6 +18,7 @@ WORKDIR="${WORKDIR:-$HOME}"
 ENV_NAME="${ENV_NAME:-layoutlmv3}"
 
 # 1. conda (install Miniconda if missing)
+set +u
 if ! command -v conda >/dev/null 2>&1; then
   if [ ! -d "$HOME/miniconda3" ]; then
     curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/miniconda.sh
@@ -30,9 +31,16 @@ else
   source "$(conda info --base)/etc/profile.d/conda.sh"
 fi
 
+# Accept Anaconda ToS on newer Miniconda releases (conda >= 25.x)
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
+
 # 2. env (README: python 3.7)
-conda create -y --name "$ENV_NAME" python=3.7
+if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+  conda create -y --name "$ENV_NAME" python=3.7
+fi
 conda activate "$ENV_NAME"
+set -u
 
 # 3. code
 mkdir -p "$WORKDIR"
@@ -42,11 +50,12 @@ fi
 cd "$WORKDIR/unilm/layoutlmv3"
 
 # 4. torch / torchvision (README: 1.10.0+cu111 / 0.11.1+cu111)
+pip install "setuptools==59.5.0" "wheel<0.40.0"
 pip install torch==1.10.0+cu111 torchvision==0.11.1+cu111 -f https://download.pytorch.org/whl/torch_stable.html
 
 # 5. python deps
-pip install -r requirements.txt
-pip install "protobuf==3.20.3"
+DS_BUILD_OPS=0 pip install -r requirements.txt
+pip install "protobuf==3.20.3" "setuptools==59.5.0"
 
 # 6. detectron2 (only needed for PubLayNet / object_detection; prebuilt wheel for cu111 + torch1.10)
 python -m pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.10/index.html
