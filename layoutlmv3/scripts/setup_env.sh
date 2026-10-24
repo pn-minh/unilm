@@ -55,7 +55,7 @@ pip install torch==1.10.0+cu111 torchvision==0.11.1+cu111 -f https://download.py
 
 # 5. python deps
 DS_BUILD_OPS=0 pip install -r requirements.txt
-pip install "protobuf==3.20.3" "setuptools==59.5.0"
+pip install "protobuf==3.20.3" "setuptools==59.5.0" "huggingface-hub==0.4.0"
 
 # 6. detectron2 (only needed for PubLayNet / object_detection; prebuilt wheel for cu111 + torch1.10)
 python -m pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.10/index.html
